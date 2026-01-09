@@ -1,5 +1,7 @@
 # DMC_project
 
+ Julia implementation of 1D diffusion Monte Carlo (DMC), following the tutorial in `2412.pdf` (Annarelli et al., arXiv:2412.06006) with both plain and importance-sampled variants.
+
 Project layout:
 
 - `Project.toml`, `Manifest.toml`
