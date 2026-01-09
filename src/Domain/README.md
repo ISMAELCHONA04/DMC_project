@@ -1,0 +1,1 @@
+Domain types and pure physics code live here.
