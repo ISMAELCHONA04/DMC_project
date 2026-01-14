@@ -1,10 +1,11 @@
 # Use-cases: DMC simulation container and state
 
-mutable struct DMCSim{H,W,RNG,G<:AbstractGuiding}
+mutable struct DMCSim{H,W,RNG,G<:AbstractGuiding,NP<:AbstractNodePolicy}
     H::H
     params::DMCParams
     walkers::Vector{W}
     guiding::G # guiding wavefunction / policy
+    nodepolicy::NP # nodal surface policy
     rng::RNG
     step::Int
     ET::Float64 # Reference energy
@@ -15,12 +16,19 @@ mutable struct DMCSim{H,W,RNG,G<:AbstractGuiding}
 end
 
 # Outer constructor with sensible defaults for histories & ET.
+function DMCSim(h::H, params::DMCParams, walkers::Vector{W}, rng::RNG;
+    guiding::G=NoGuiding(),
+    nodepolicy::NP=NoNode(),
+    step::Int=0) where {H,W,RNG,G<:AbstractGuiding,NP<:AbstractNodePolicy}
+    return DMCSim{H,W,RNG,G,NP}(h, params, walkers, guiding, nodepolicy, rng, step, params.ET0, Float64[], Int[], Float64[], Vector{Vector{Vector{Float64}}}())
+end
+
 function DMCSim(h::H, params::DMCParams, walkers::Vector{W}, guiding::G, rng::RNG, step::Int=0) where {H,W,G<:AbstractGuiding,RNG}
-    return DMCSim{H,W,RNG,G}(h, params, walkers, guiding, rng, step, params.ET0, Float64[], Int[], Float64[], Vector{Vector{Vector{Float64}}}())
+    return DMCSim(h, params, walkers, rng; guiding=guiding, nodepolicy=NoNode(), step=step)
 end
 
 function DMCSim(h::H, params::DMCParams, walkers::Vector{W}, rng::RNG, step::Int=0) where {H,W,RNG}
-    return DMCSim(h, params, walkers, NoGuiding(), rng, step)
+    return DMCSim(h, params, walkers, rng; guiding=NoGuiding(), nodepolicy=NoNode(), step=step)
 end
 
 # Initialize simulation with given walkers.
@@ -64,21 +72,41 @@ end
 
 # Estimate mean energy from current walker set.
 function estimate_energy(sim::DMCSim)::Float64
-    if sim.guiding isa NoGuiding
-        vals = Float64[potential(sim.H, position(w)) for w in sim.walkers]
-    else
-        vals = Float64[local_energy(sim.guiding, position(w)) for w in sim.walkers]
-    end
+    return estimate_energy(sim, sim.guiding)
+end
+
+function estimate_energy(sim::DMCSim, ::NoGuiding)::Float64
+    vals = Float64[potential(sim.H, position(w)) for w in sim.walkers]
+    return isempty(vals) ? 0.0 : sum(vals) / length(vals)
+end
+
+function estimate_energy(sim::DMCSim, g::ImportanceGuiding)::Float64
+    vals = Float64[local_energy(g, position(w)) for w in sim.walkers]
     return isempty(vals) ? 0.0 : sum(vals) / length(vals)
 end
 
 # Record current state of the simulation for history tracking.
-function record_state!(sim::DMCSim)
+function record_state!(sim::DMCSim, record_positions::Bool=true)
     push!(sim.population_history, length(sim.walkers))
     push!(sim.energy_mean_history, estimate_energy(sim))
     push!(sim.ET_history, sim.ET)
-    record_positions!(sim)
+    if record_positions
+        record_positions!(sim)
+    end
     return sim
+end
+
+"""
+    crosses_node(nodepolicy, guiding, Rold, Rnew) -> Bool
+
+Return `true` if a proposed move crosses the nodal surface defined by the trial
+wavefunction sign.
+"""
+crosses_node(::NoNode, guiding, Rold, Rnew) = false
+function crosses_node(::FixedNode, guiding, Rold, Rnew)
+    sold = signpsi(guiding, Rold)
+    snew = signpsi(guiding, Rnew)
+    return (sold == 0) || (snew == 0) || (sold != snew)
 end
 
 # Branching factor for no importance sampling (uses potential energy).
@@ -146,6 +174,10 @@ function step!(sim::DMCSim)
         Rold = position(w)
         Rnew = propose_move(sim, w, sim.guiding)
 
+        if crosses_node(sim.nodepolicy, sim.guiding, Rold, Rnew)
+            continue
+        end
+
         P = branching_factor(sim, Rold, Rnew, sim.guiding)
         m = floor(Int, P + rand(sim.rng))
 
@@ -162,8 +194,15 @@ function step!(sim::DMCSim)
 end
 
 # Main simulation loop (includes equilibration).
-function run_simulation!(sim::DMCSim)
-    record_state!(sim)
+"""
+    run_simulation!(sim::DMCSim; snapshot_steps=Int[])
+
+Run the DMC simulation. When `snapshot_steps` is non-empty, walker positions are
+recorded only at those integer steps (including step 0).
+"""
+function run_simulation!(sim::DMCSim; snapshot_steps::AbstractVector{<:Integer}=Int[])
+    snapshot_set = isempty(snapshot_steps) ? nothing : Set(snapshot_steps)
+    record_state!(sim, snapshot_set === nothing ? true : (0 in snapshot_set))
 
     for s in 1:sim.params.nsteps
         step!(sim) # preforms dmc step
@@ -171,7 +210,7 @@ function run_simulation!(sim::DMCSim)
         if s > sim.params.nequil
             update_ET!(sim)   # update reference energy after equilibration
         end
-        record_state!(sim)
+        record_state!(sim, snapshot_set === nothing ? true : (s in snapshot_set))
     end
     return sim
 end
