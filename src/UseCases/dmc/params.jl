@@ -1,4 +1,4 @@
-# Use-cases: runtime parameters for DMC
+# UseCases/dmc: Runtime parameters for DMC
 
 struct DMCParams
     dt::Float64
