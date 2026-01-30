@@ -1,5 +1,7 @@
 # UseCases/dmc: Plotting utilities for DMC visualization
 
+import Plots: histogram, scatter
+
 """
     plot_snapshot_1d_density(snap::AbstractVector{<:AbstractVector}; kwargs...)
 

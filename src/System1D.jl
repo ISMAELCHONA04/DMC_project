@@ -53,7 +53,7 @@ export DMCParams, DMCSim
 export step!, run_simulation!, run_dmc!
 export propose_move, crosses_node, branching_factor
 export update_ET!
-export record_state!, record_positions!, estimate_energy
+export record_state!, record_positions!, estimate_energy, estimate_energy_variance
 export plot_snapshot_1d_density, plot_snapshot_1d_points
 
 # VMC exports

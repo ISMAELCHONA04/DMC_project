@@ -30,7 +30,7 @@ function propose_move(sim::DMCSim, w::Walker, g::ImportanceGuiding)
     Rold  = position(w)
     Fold = drift(g, Rold)
     # Forward proposal: drift + diffusion.
-    Rnew = Rold .+ D*dt .* Fold .+ sqrt(2D*dt) .* randn(sim.rng, length(Rold))
+    Rnew = Rold .+ D*dt .* Fold .+ sqrt(2 * D * dt) .* randn(sim.rng, length(Rold))
 
     Fnew = drift(g, Rnew)
     denom = 4 * D * dt

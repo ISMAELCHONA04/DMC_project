@@ -20,6 +20,7 @@ Includes population, energy mean, reference energy, and optionally walker positi
 function record_state!(sim, record_positions::Bool=true)
     push!(sim.population_history, length(sim.walkers))
     push!(sim.energy_mean_history, estimate_energy(sim))
+    push!(sim.energy_variance_history, estimate_energy_variance(sim))
     push!(sim.ET_history, sim.ET)
     if record_positions
         record_positions!(sim)
