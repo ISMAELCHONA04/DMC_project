@@ -1,6 +1,7 @@
 # GFMC Benchmark Theory Comparisons
 
 This document collects the benchmark cases whose outputs can be compared directly to paper-backed theory references already cited in the repository.
+For an embedded, figure-first version of the same material, see [GFMC_PAPER_BACKED_GALLERY.md](GFMC_PAPER_BACKED_GALLERY.md).
 
 Regenerate the benchmark outputs and these curated figures from the repository root with:
 

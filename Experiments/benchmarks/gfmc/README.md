@@ -101,7 +101,8 @@ For a tracked, GitHub-visible figure set instead of ignored benchmark outputs,
 use `generate_theory_comparison_gallery.jl`. It reruns the paper-backed
 benchmark cases, generates curated history/error overlays and density
 comparisons, and writes them under `docs/assets/gfmc_theory_comparisons/` with
-an index page at `docs/GFMC_BENCHMARK_THEORY_COMPARISONS.md`.
+an index page at `docs/GFMC_BENCHMARK_THEORY_COMPARISONS.md` and an embedded
+gallery page at `docs/GFMC_PAPER_BACKED_GALLERY.md`.
 
 ## Parameter Strategy
 

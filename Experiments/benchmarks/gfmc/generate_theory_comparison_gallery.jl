@@ -8,6 +8,7 @@ using Plots
 const THEORY_DOC_DIR = joinpath(PROJECT_ROOT, "docs")
 const THEORY_ASSET_DIR = joinpath(THEORY_DOC_DIR, "assets", "gfmc_theory_comparisons")
 const THEORY_DOC_PATH = joinpath(THEORY_DOC_DIR, "GFMC_BENCHMARK_THEORY_COMPARISONS.md")
+const PAPER_GALLERY_DOC_PATH = joinpath(THEORY_DOC_DIR, "GFMC_PAPER_BACKED_GALLERY.md")
 
 mkpath(THEORY_ASSET_DIR)
 
@@ -251,6 +252,7 @@ function write_theory_gallery_markdown(specs, final_rows, generated)
         println(io, "# GFMC Benchmark Theory Comparisons")
         println(io)
         println(io, "This document collects the benchmark cases whose outputs can be compared directly to paper-backed theory references already cited in the repository.")
+        println(io, "For an embedded, figure-first version of the same material, see [GFMC_PAPER_BACKED_GALLERY.md](GFMC_PAPER_BACKED_GALLERY.md).")
         println(io)
         println(io, "Regenerate the benchmark outputs and these curated figures from the repository root with:")
         println(io)
@@ -298,6 +300,70 @@ function write_theory_gallery_markdown(specs, final_rows, generated)
     return THEORY_DOC_PATH
 end
 
+function write_paper_backed_gallery_markdown(generated, final_rows)
+    citations = literature_citations()
+    final_lookup = Dict(row.case_id => row for row in final_rows)
+
+    open(PAPER_GALLERY_DOC_PATH, "w") do io
+        println(io, "# GFMC Paper-Backed Gallery")
+        println(io)
+        println(io, "This gallery collects the GFMC benchmark figures that can be compared directly to paper-backed theory references. Each history panel plots real simulation data against the relevant exact or analytically inferred reference already cited in the repository.")
+        println(io)
+        println(io, "Regenerate the gallery from the repository root with:")
+        println(io)
+        println(io, "```bash")
+        println(io, "julia --project=. Experiments/benchmarks/gfmc/generate_theory_comparison_gallery.jl")
+        println(io, "```")
+        println(io)
+        println(io, "## Aggregate Overview")
+        println(io)
+        println(io, "Simulation markers and curves are plotted directly against theory references in the figures below.")
+        println(io)
+        println(io, "![Final energies vs theory](assets/gfmc_theory_comparisons/final_energy_vs_theory.png)")
+        println(io)
+        println(io, "![Final energy error vs theory](assets/gfmc_theory_comparisons/final_energy_error_vs_theory.png)")
+        println(io)
+
+        for item in generated
+            meta = item.meta
+            row = item.row
+            ref_val = reference_value(meta, row)
+            mean_energy = parse_float(row, "mean_energy")
+            sem_energy = parse_float(row, "sem_energy")
+            citations_md = join(["[$(citations[id].short)]($(citations[id].url))" for id in meta.citation_ids], ", ")
+
+            println(io, "## ", meta.display_label)
+            println(io)
+            println(io, "- Tier: `", item.spec.tier, "`")
+            println(io, "- Variant: `", row["variant_label"], "`")
+            println(io, "- Theory/data pairing: the history figure overlays the GFMC energy trace with the paper-backed reference line and shows the simulation-minus-theory residual in the right panel.")
+            if item.density_path !== nothing
+                println(io, "- Density/data pairing: the density figure overlays the sampled final-density estimate with the benchmark's exact theory/reference curve for the cited model.")
+            end
+            println(io, "- Computed final value: `", @sprintf("%.8f +/- %.2e", mean_energy, sem_energy), "`")
+            println(io, "- Theory reference: `", @sprintf("%.8f", ref_val), "`")
+            println(io, "- Final error: `", @sprintf("%.3e", mean_energy - ref_val), "`")
+            println(io, "- References: ", citations_md)
+            println(io)
+            println(io, meta.theory_note)
+            println(io)
+            println(io, "![", meta.display_label, " history](assets/gfmc_theory_comparisons/", item.spec.slug, "_history.png)")
+            println(io)
+            if item.density_path !== nothing
+                println(io, "![", meta.display_label, " density](assets/gfmc_theory_comparisons/", item.spec.slug, "_density.png)")
+                println(io)
+            end
+        end
+
+        println(io, "## Scope")
+        println(io)
+        println(io, "- This page is intentionally limited to paper-backed cases. Repository-internal exact-reference benchmarks, such as the periodic-ion soft-Coulomb systems, are excluded here because they do not match a published parameter set one-to-one.")
+        println(io, "- The unguided hydrogen case remains in the gallery because it is a useful failure/stress comparison against the same odd-state hydrogen reference.")
+    end
+
+    return PAPER_GALLERY_DOC_PATH
+end
+
 function main()
     specs = gallery_specs()
 
@@ -315,16 +381,24 @@ function main()
         history = history_rows(spec.case_id, spec.tier, spec.variant_id)
         history_path = save_history_comparison(spec, meta, row, history)
         density_path = copy_density_figure(spec)
-        push!(generated, (slug=spec.slug, history_path=history_path, density_path=density_path))
+        push!(generated, (
+            spec=spec,
+            meta=meta,
+            row=row,
+            history_path=history_path,
+            density_path=density_path,
+        ))
     end
 
     final_rows = build_curated_final_rows(specs)
     final_plot = save_curated_final_dumbbell(final_rows)
     error_plot = save_curated_final_error(final_rows)
     doc_path = write_theory_gallery_markdown(specs, final_rows, generated)
+    gallery_doc_path = write_paper_backed_gallery_markdown(generated, final_rows)
 
     println("Curated theory gallery written.")
     println("Documentation: ", abspath(doc_path))
+    println("Paper-backed gallery: ", abspath(gallery_doc_path))
     println("Aggregate energy plot: ", abspath(final_plot))
     println("Aggregate error plot: ", abspath(error_plot))
     for item in generated
