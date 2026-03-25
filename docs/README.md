@@ -8,6 +8,7 @@ the repository.
 - `DMC_USER_GUIDE.md`: public DMC API, physics inputs, and run-loop behavior
 - `VMC_USER_GUIDE.md`: VMC API, proposal modes, and estimator conventions
 - `GFMC_USER_GUIDE.md`: fixed-population GFMC API, kernels, and warm starts
+- `GFMC_BENCHMARK_THEORY_COMPARISONS.md`: curated simulation-vs-theory figures for paper-backed GFMC benchmarks
 - `GFMC_CODE_WALKTHROUGH.tex`: LaTeX source for a deeper implementation walkthrough
 
 ## Building the LaTeX walkthrough

@@ -65,6 +65,7 @@ julia --project=. Experiments/benchmarks/gfmc/run_gfmc_benchmarks.jl smoke all
 julia --project=. Experiments/benchmarks/gfmc/run_gfmc_benchmarks.jl sweep accuracy
 julia --project=. Experiments/benchmarks/gfmc/run_gfmc_benchmarks.jl final periodic_ion_single_particle,periodic_ion_spinless_fermions
 julia --project=. Experiments/benchmarks/gfmc/generate_literature_report.jl
+julia --project=. Experiments/benchmarks/gfmc/generate_theory_comparison_gallery.jl
 ```
 
 Selections may be:
@@ -95,6 +96,12 @@ The literature-comparison report is written under
 
 The source mapping from benchmark cases to primary references lives in
 `Experiments/benchmarks/gfmc/LITERATURE_REFERENCES.md`.
+
+For a tracked, GitHub-visible figure set instead of ignored benchmark outputs,
+use `generate_theory_comparison_gallery.jl`. It reruns the paper-backed
+benchmark cases, generates curated history/error overlays and density
+comparisons, and writes them under `docs/assets/gfmc_theory_comparisons/` with
+an index page at `docs/GFMC_BENCHMARK_THEORY_COMPARISONS.md`.
 
 ## Parameter Strategy
 
