@@ -1,31 +1,19 @@
-# UseCases/vmc: VMC energy estimators (skeleton)
+# UseCases/vmc: VMC energy estimators
 
 """
     estimate_energy_vmc(sim::VMCSim) -> Float64
 
-Estimate energy from current walker ensemble in VMC (skeleton implementation).
-Currently not implemented.
+Estimate the current mean local energy of the walker ensemble.
 """
 function estimate_energy_vmc(sim::VMCSim)::Float64
-    if isempty(sim.walkers)
-        return 0.0
-    end
-    vals = Float64[local_energy(sim.guiding, position(w)) for w in sim.walkers]
-    return isempty(vals) ? 0.0 : sum(vals) / length(vals)
+    return estimate_energy(sim)
 end
 
 """
     compute_variance(sim::VMCSim) -> Float64
 
-Compute energy variance for the walker ensemble (skeleton implementation).
-Currently not implemented.
+Compute the variance of the current local-energy samples.
 """
 function compute_variance(sim::VMCSim)::Float64
-    if isempty(sim.walkers)
-        return 0.0
-    end
-    energies = Float64[local_energy(sim.guiding, position(w)) for w in sim.walkers]
-    mean_E = sum(energies) / length(energies)
-    variance = sum((E - mean_E)^2 for E in energies) / length(energies)
-    return variance
+    return estimate_energy_variance(sim)
 end

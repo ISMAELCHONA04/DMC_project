@@ -2,15 +2,22 @@
 
 abstract type AbstractGuiding end
 
+"""Guiding policy used for unguided projector dynamics."""
 struct NoGuiding <: AbstractGuiding end
 
-# Importance-sampling wrapper: combines trial WF with Hamiltonian.
+"""
+    ImportanceGuiding(trial, H)
+
+Importance-sampling wrapper that combines a `TrialWF` with a `Hamiltonian`.
+The method layers use it to compute drift vectors, local energies, and trial
+signs.
+"""
 struct ImportanceGuiding{TW,H} <: AbstractGuiding
     trial::TW
     H::H
 end
 
-# Quantum force (drift) used in drift-diffusion proposals.
+"""Return the quantum-force drift vector `2∇log|ψ_T|` for configuration `R`."""
 drift(g::ImportanceGuiding, R) = 2 .* g.trial.gradlogpsi(R)
 
 # Sign of the trial wavefunction for node handling.
@@ -25,7 +32,11 @@ signpsi(::NoGuiding, R) = 1.0
 signpsi(t::TrialWF, R) = t.signpsi(R)
 signpsi(g::ImportanceGuiding, R) = signpsi(g.trial, R)
 
-# Local energy EL = (HψT)/ψT, used in branching.
+"""
+    local_energy(g, R) -> Real
+
+Return the trial-state local energy `(Hψ_T)/ψ_T` for configuration `R`.
+"""
 function local_energy(g::ImportanceGuiding, R)
     D = diffusion_constant(g.H)
     gradlog = g.trial.gradlogpsi(R)

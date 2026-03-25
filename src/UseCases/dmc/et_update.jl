@@ -4,13 +4,15 @@
     update_ET!(sim::DMCSim)
 
 Update reference energy based on current population (growth estimator).
-Uses the average reference energy over the last `nblocks` steps.
+Uses the average reference energy over the last `nblocks` steps and a
+configurable population-control gain.
 """
 function update_ET!(sim::DMCSim)
     Nt = length(sim.walkers)
     N0 = sim.params.targetN
     dt = sim.params.dt
     window = sim.params.nblocks
+    population_control_gain = sim.params.population_control_gain
 
     if isempty(sim.ET_history)
         Eblock = sim.ET
@@ -21,6 +23,6 @@ function update_ET!(sim::DMCSim)
         Eblock = sum(block) / length(block)
     end
 
-    sim.ET = Eblock - (1 / dt) * log(Nt / N0)
+    sim.ET = Eblock - (population_control_gain / dt) * log(Nt / N0)
     return sim
 end

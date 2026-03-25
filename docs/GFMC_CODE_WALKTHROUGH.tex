@@ -1,0 +1,774 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{listings}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue!50!black,
+    urlcolor=blue!50!black
+}
+
+\lstdefinestyle{codeblock}{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    columns=fullflexible,
+    keepspaces=true,
+    showstringspaces=false,
+    frame=single,
+    framerule=0.3pt,
+    rulecolor=\color{black!30},
+    backgroundcolor=\color{black!2}
+}
+
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+\newcommand{\dtau}{\Delta\tau}
+\newcommand{\ET}{E_{\mathrm{T}}}
+\newcommand{\EL}{E_{\mathrm{L}}}
+
+\title{GFMC in This Repository: A Theory-to-Code Walkthrough}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+
+\section{Purpose}
+
+This note explains how the repository's GFMC implementation realizes the
+imaginary-time projection idea
+\begin{equation}
+\Psi_{n+1} = e^{-\dtau(H-\ET)} \Psi_n,
+\end{equation}
+with direct reference to the actual Julia code under
+\code{src/UseCases/gfmc/}.
+
+The main point is that this code is \emph{not} a branching-population DMC
+engine. It is a \emph{fixed-population, weighted GFMC projector}:
+\begin{itemize}
+    \item walker coordinates are stored in a dense matrix,
+    \item each walker carries a multiplicative weight,
+    \item those weights are periodically resampled back to an equally weighted
+    ensemble,
+    \item optional importance sampling and optional fixed-node killing modify
+    the short-time kernel.
+\end{itemize}
+
+So the clean conceptual summary is:
+\begin{quote}
+This code applies a short-time approximation to the imaginary-time Green's
+function, samples the move part with Gaussian or drift-diffusion proposals,
+accumulates the diagonal part into walker weights, and periodically
+reconfigures to keep exactly \code{targetN} walkers.
+\end{quote}
+
+\section{What Object the Code Represents}
+
+At the operator level, GFMC repeatedly applies
+\begin{equation}
+G = e^{-\dtau(H-\ET)}.
+\end{equation}
+In coordinate space this is the integral transform
+\begin{equation}
+\Psi_{n+1}(R) = \int dR' \, G(R,R';\dtau)\Psi_n(R').
+\end{equation}
+
+With importance sampling by a trial state $\Psi_T$, it is more natural to evolve
+\begin{equation}
+f(R,\tau) = \Psi_T(R)\Psi(R,\tau),
+\end{equation}
+using an importance-sampled kernel $\widetilde G$.
+
+The code stores a weighted ensemble
+\begin{equation}
+f_n(R) \approx \sum_{j=1}^{N_w} w_j \, \delta(R-R_j),
+\end{equation}
+where:
+\begin{itemize}
+    \item the columns $R_j$ live in \code{sim.positions},
+    \item the weights $w_j$ live in \code{sim.weights},
+    \item the batch data \code{drift}, \code{logpsi}, \code{branch\_energy},
+    and \code{sign} hold the local information needed to apply the short-time
+    kernel.
+\end{itemize}
+
+That is the key bridge from the math to the implementation: the integral
+operator is represented by repeated stochastic updates of
+\code{(positions, weights)}.
+
+\section{Core State and Interfaces}
+
+\subsection{Parameters and per-walker data}
+
+The runtime parameters are deliberately small:
+
+\begin{lstlisting}[style=codeblock,caption={\code{src/UseCases/gfmc/params.jl}}]
+struct GFMCParams
+    dt::Float64
+    nsteps::Int
+    nequil::Int
+    targetN::Int
+    ET0::Float64
+    feedback::Float64
+    reconfiguration_interval::Int
+    branch_cap::Float64
+    energy_window::Int
+end
+\end{lstlisting}
+
+These map almost one-to-one onto the projector formula:
+\begin{itemize}
+    \item \code{dt} is $\dtau$,
+    \item \code{ET0} is the initial reference energy $\ET$,
+    \item \code{reconfiguration\_interval} determines how often the weighted
+    ensemble is resampled,
+    \item \code{branch\_cap} limits very large short-time weights.
+\end{itemize}
+
+The auxiliary data carried for every walker is:
+
+\begin{lstlisting}[style=codeblock,caption={\code{src/UseCases/gfmc/kernels.jl}}]
+mutable struct GFMCBatchData{M<:AbstractMatrix{Float64},V<:AbstractVector{Float64}}
+    drift::M
+    logpsi::V
+    branch_energy::V
+    sign::V
+end
+\end{lstlisting}
+
+This already tells you the structure of the implemented kernel:
+\begin{itemize}
+    \item \code{drift} defines the proposal mean for guided moves,
+    \item \code{logpsi} enters the Metropolis correction,
+    \item \code{branch\_energy} provides the exponential weight factor,
+    \item \code{sign} is the fixed-node diagnostic.
+\end{itemize}
+
+\subsection{The simulation container}
+
+The full GFMC state is stored in \code{GFMCSim}:
+
+\begin{lstlisting}[style=codeblock,caption={Excerpt from \code{src/UseCases/gfmc/sim.jl}}]
+mutable struct GFMCSim{
+    K<:AbstractGFMCKernel,
+    RNG,
+    B<:AbstractGFMCBackend,
+    R<:AbstractGFMCReconfiguration,
+    M<:AbstractMatrix{Float64},
+    V<:AbstractVector{Float64},
+}
+    kernel::K
+    params::GFMCParams
+    positions::M
+    proposal_positions::M
+    state_data::GFMCBatchData{M,V}
+    proposal_data::GFMCBatchData{M,V}
+    weights::V
+    rng::RNG
+    backend::B
+    reconfiguration::R
+    step::Int
+    ET::Float64
+    ET_history::Vector{Float64}
+    population_history::Vector{Int}
+    energy_mean_history::Vector{Float64}
+    energy_variance_history::Vector{Float64}
+    effective_population_history::Vector{Float64}
+    mean_weight_history::Vector{Float64}
+    acceptance_history::Vector{Float64}
+    walker_positions_history::Vector{Vector{Vector{Float64}}}
+end
+\end{lstlisting}
+
+There are two important design choices here:
+\begin{enumerate}
+    \item Walkers are stored column-wise in a matrix, so one GFMC step can act
+    on a whole batch.
+    \item The code keeps both current and proposal buffers, then swaps them
+    after a step instead of reallocating.
+\end{enumerate}
+
+\section{Kernel Abstraction}
+
+The GFMC engine itself does not know the physics. It asks the kernel object for
+the information needed to build a short-time propagator:
+
+\begin{lstlisting}[style=codeblock,caption={Excerpt from \code{src/UseCases/gfmc/abstract.jl}}]
+abstract type AbstractGFMCKernel end
+abstract type AbstractGFMCBackend end
+abstract type AbstractGFMCReconfiguration end
+
+configuration_dimension(::AbstractGFMCKernel) = error("configuration_dimension not implemented")
+diffusion_constant(::AbstractGFMCKernel) = error("diffusion_constant not implemented")
+boundary(::AbstractGFMCKernel) = error("boundary not implemented")
+uses_importance_sampling(::AbstractGFMCKernel) = false
+uses_fixed_node(::AbstractGFMCKernel) = false
+\end{lstlisting}
+
+This is the code form of the abstract GFMC statement
+\begin{equation}
+f_{n+1} = \widetilde G f_n.
+\end{equation}
+The engine knows \emph{how} to apply a short-time kernel, while the kernel type
+supplies \emph{what} drift, local energy, sign, diffusion constant, and
+boundary geometry mean for a particular Hamiltonian.
+
+\subsection{Generic Hamiltonian path}
+
+For a generic Hamiltonian, the importance-sampled quantities are filled by the
+routine shown below:
+
+\begin{lstlisting}[style=codeblock,caption={Generic kernel evaluation in \code{src/UseCases/gfmc/kernels.jl}}]
+function evaluate_configuration_data!(kernel::GenericGFMCKernel, data::GFMCBatchData, X::AbstractMatrix{<:Real})
+    uses_guiding = uses_importance_sampling(kernel)
+    @inbounds for j in axes(X, 2)
+        R = @view X[:, j]
+        if uses_guiding
+            drift_j = drift(kernel.guiding, R)
+            for i in axes(X, 1)
+                data.drift[i, j] = Float64(drift_j[i])
+            end
+            data.logpsi[j] = Float64(kernel.guiding.trial.logpsi(R))
+            data.branch_energy[j] = Float64(local_energy(kernel.guiding, R))
+            data.sign[j] = Float64(signpsi(kernel.guiding, R))
+        else
+            for i in axes(X, 1)
+                data.drift[i, j] = 0.0
+            end
+            data.logpsi[j] = 0.0
+            data.branch_energy[j] = Float64(potential(kernel.H, R))
+            data.sign[j] = 1.0
+        end
+    end
+    return data
+end
+\end{lstlisting}
+
+So in the guided case, the code is exactly using the standard DMC/GFMC objects
+\begin{align}
+F(R) &= 2\nabla \log |\Psi_T(R)|, \\
+\EL(R) &= -D\left(\nabla^2 \log |\Psi_T(R)| + |\nabla \log |\Psi_T(R)||^2\right) + V(R).
+\end{align}
+
+This comes from the shared guiding helper:
+
+\begin{lstlisting}[style=codeblock,caption={\code{src/Domain/guiding.jl}}]
+drift(g::ImportanceGuiding, R) = 2 .* g.trial.gradlogpsi(R)
+
+function local_energy(g::ImportanceGuiding, R)
+    D = diffusion_constant(g.H)
+    gradlog = g.trial.gradlogpsi(R)
+    lapllog = g.trial.lapllogpsi(R)
+    V = potential(g.H, R)
+    return -D * (lapllog + sum(abs2, gradlog)) + V
+end
+\end{lstlisting}
+
+\subsection{Specialized fermion-ring path}
+
+The repository also includes a hand-written kernel for
+\code{SpinlessFermionRing1D}. The crucial excerpt is:
+
+\begin{lstlisting}[style=codeblock,caption={Excerpt from \code{src/UseCases/gfmc/kernels.jl}}]
+if kernel.use_guiding
+    for i in 1:model.N
+        xi = X[i, j]
+        coskx = cos(model.k_lat * xi)
+        sinkx = sin(model.k_lat * xi)
+        logpsi_j += model.lambda * coskx
+        data.drift[i, j] = -2.0 * model.lambda * model.k_lat * sinkx
+        lapl_j += -model.lambda * model.k_lat^2 * coskx
+        potential_j += model.V0 * coskx
+    end
+
+    for i in 1:(model.N - 1)
+        for k in (i + 1):model.N
+            dx_ik = displacement(model.bc, X[k, j], X[i, j])
+            u = model.alpha_pair * dx_ik
+            s = sin(u)
+            abs_s = abs(s)
+
+            if abs_s < model.node_tol
+                sign_j = 0.0
+            elseif sign_j != 0.0 && s < 0
+                sign_j = -sign_j
+            end
+
+            s_eff = abs_s < model.trig_eps ? (s >= 0 ? model.trig_eps : -model.trig_eps) : s
+            logpsi_j += log(abs(s_eff))
+
+            c = model.alpha_pair * cos(u) / s_eff
+            data.drift[i, j] += 2.0 * c
+            data.drift[k, j] -= 2.0 * c
+
+            lapl_j += -2.0 * (model.alpha_pair^2) / (s_eff * s_eff)
+        end
+    end
+
+    grad_norm2 = 0.0
+    for i in 1:model.N
+        grad_i = 0.5 * data.drift[i, j]
+        grad_norm2 += grad_i * grad_i
+    end
+
+    data.logpsi[j] = logpsi_j
+    data.branch_energy[j] = -model.D * (lapl_j + grad_norm2) + potential_j
+    data.sign[j] = sign_j
+end
+\end{lstlisting}
+
+This is where the model-specific trial state is encoded:
+\begin{itemize}
+    \item the one-body lattice factor contributes the $\lambda \cos(k_{\rm lat}x_i)$
+    term,
+    \item the pairwise $\sin(\alpha_{\rm pair} \Delta x_{ik})$ factor carries
+    antisymmetry,
+    \item \code{sign\_j} is computed from that pair structure, so fixed-node
+    killing has real content here.
+\end{itemize}
+
+\section{The GFMC Step as Implemented}
+
+At the mathematical level, the code is using a short-time kernel of the form
+\begin{equation}
+\widetilde G(R',R;\dtau)
+\approx
+T(R' \leftarrow R)
+\exp\left[
+-\frac{\dtau}{2}\bigl(\EL(R')+\EL(R)-2\ET\bigr)
+\right],
+\end{equation}
+where $T$ is either a plain Gaussian diffusion proposal or a drifted Gaussian
+proposal corrected by Metropolis-Hastings.
+
+\subsection{Proposal generation}
+
+The first part of \code{step!} is:
+
+\begin{lstlisting}[style=codeblock,caption={Proposal generation in \code{src/UseCases/gfmc/run.jl}}]
+function step!(sim::GFMCSim)
+    D = diffusion_constant(sim.kernel)
+    dt = sim.params.dt
+    sigma = sqrt(2.0 * D * dt)
+    nwalkers = size(sim.positions, 2)
+    bc = boundary(sim.kernel)
+
+    if uses_importance_sampling(sim.kernel)
+        randn!(sim.backend, sim.rng, sim.proposal_positions)
+        @inbounds for j in 1:nwalkers
+            for i in axes(sim.positions, 1)
+                sim.proposal_positions[i, j] =
+                    sim.positions[i, j] +
+                    D * dt * sim.state_data.drift[i, j] +
+                    sigma * sim.proposal_positions[i, j]
+            end
+        end
+    else
+        randn!(sim.backend, sim.rng, sim.proposal_positions)
+        @inbounds for j in 1:nwalkers
+            for i in axes(sim.positions, 1)
+                sim.proposal_positions[i, j] =
+                    sim.positions[i, j] + sigma * sim.proposal_positions[i, j]
+            end
+        end
+    end
+
+    wrap_configurations!(sim.kernel, sim.proposal_positions)
+    evaluate_configuration_data!(sim.kernel, sim.proposal_data, sim.proposal_positions)
+\end{lstlisting}
+
+This is the code version of:
+\begin{align}
+R' &= R + \sqrt{2D\dtau}\,\eta && \text{(unguided)}, \\
+R' &= R + D\dtau\,F(R) + \sqrt{2D\dtau}\,\eta && \text{(guided)}.
+\end{align}
+
+The \code{wrap\_configurations!} call is important: because the engine supports
+periodic boundaries, all proposals are mapped back into the simulation cell
+before their local data is evaluated.
+
+\subsection{Fixed-node killing, acceptance, and branching}
+
+The heart of the step is the walker loop:
+
+\begin{lstlisting}[style=codeblock,caption={Walker update logic in \code{src/UseCases/gfmc/run.jl}}]
+@inbounds for j in 1:nwalkers
+    killed = false
+
+    if uses_fixed_node(sim.kernel)
+        sold = sim.state_data.sign[j]
+        snew = sim.proposal_data.sign[j]
+        killed = (sold == 0.0) || (snew == 0.0) || (sold != snew)
+    end
+
+    if killed
+        for i in axes(sim.positions, 1)
+            sim.proposal_positions[i, j] = sim.positions[i, j]
+            sim.proposal_data.drift[i, j] = sim.state_data.drift[i, j]
+        end
+        sim.proposal_data.logpsi[j] = sim.state_data.logpsi[j]
+        sim.proposal_data.branch_energy[j] = sim.state_data.branch_energy[j]
+        sim.proposal_data.sign[j] = sim.state_data.sign[j]
+        sim.weights[j] = 0.0
+        continue
+    end
+
+    if uses_importance_sampling(sim.kernel)
+        denom = 4.0 * D * dt
+        sq_f = 0.0
+        sq_b = 0.0
+
+        for i in axes(sim.positions, 1)
+            mu_f = sim.positions[i, j] + D * dt * sim.state_data.drift[i, j]
+            mu_b = sim.proposal_positions[i, j] + D * dt * sim.proposal_data.drift[i, j]
+            df = displacement(bc, mu_f, sim.proposal_positions[i, j])
+            db = displacement(bc, mu_b, sim.positions[i, j])
+            sq_f += df * df
+            sq_b += db * db
+        end
+
+        log_ratio = -(sq_b - sq_f) / denom +
+                    2.0 * (sim.proposal_data.logpsi[j] - sim.state_data.logpsi[j])
+        if log(rand(sim.rng)) >= min(0.0, log_ratio)
+            for i in axes(sim.positions, 1)
+                sim.proposal_positions[i, j] = sim.positions[i, j]
+                sim.proposal_data.drift[i, j] = sim.state_data.drift[i, j]
+            end
+            sim.proposal_data.logpsi[j] = sim.state_data.logpsi[j]
+            sim.proposal_data.branch_energy[j] = sim.state_data.branch_energy[j]
+            sim.proposal_data.sign[j] = sim.state_data.sign[j]
+        else
+            accept_count += 1
+        end
+    else
+        accept_count += 1
+    end
+
+    sim.weights[j] *= _branch_weight(
+        sim,
+        sim.state_data.branch_energy[j],
+        sim.proposal_data.branch_energy[j],
+    )
+end
+\end{lstlisting}
+
+There are three separate GFMC ideas embedded here.
+
+\paragraph{1. Fixed-node constraint.}
+If the old and new signs disagree, or if either sign is zero, the walker is not
+allowed to cross the node. In this implementation the walker is reverted and
+its weight is set to zero. So fixed-node here is realized as \emph{killing plus
+later resampling}, not by reflecting the move.
+
+\paragraph{2. Importance-sampled acceptance.}
+The forward and backward drifted Gaussians are compared using the
+Metropolis-Hastings ratio
+\begin{equation}
+\log A =
+-\frac{1}{4D\dtau}\left(\|R-\mu_b\|^2-\|R'-\mu_f\|^2\right)
++ 2\bigl(\log|\Psi_T(R')|-\log|\Psi_T(R)|\bigr),
+\end{equation}
+with periodic-boundary-aware displacements from
+\code{src/Domain/boundaries1D.jl}. This is exactly what enforces detailed
+balance for the drifted proposal.
+
+\paragraph{3. Short-time branching weight.}
+The multiplicative weight factor is defined by:
+
+\begin{lstlisting}[style=codeblock,caption={\code{src/UseCases/gfmc/run.jl}}]
+function _branch_weight(sim::GFMCSim, Eold::Real, Enew::Real)
+    logw = -0.5 * sim.params.dt * ((Float64(Eold) + Float64(Enew)) - 2.0 * sim.ET)
+    w = exp(clamp(logw, -700.0, 700.0))
+    return min(w, sim.params.branch_cap)
+end
+\end{lstlisting}
+
+This is the trapezoidal short-time approximation
+\begin{equation}
+w_{\rm branch} \approx
+\exp\left[
+-\frac{\dtau}{2}\bigl(\EL(R_{\rm old})+\EL(R_{\rm new})-2\ET\bigr)
+\right],
+\end{equation}
+with two practical safeguards:
+\begin{itemize}
+    \item the logarithm is clamped before exponentiation,
+    \item the resulting weight is capped by \code{branch\_cap}.
+\end{itemize}
+
+\subsection{Buffer swap and diagnostics}
+
+After all walkers are processed, the current and proposal buffers are swapped.
+Then the code records
+\begin{equation}
+N_{\rm eff} = \frac{\left(\sum_j w_j\right)^2}{\sum_j w_j^2},
+\end{equation}
+the mean weight, and the acceptance rate. This is the right diagnostic because
+the actual number of stored walkers remains fixed even when the weighted
+ensemble has effectively collapsed.
+
+\section{Reconfiguration: Fixed Population Instead of Branching}
+
+The defining difference from branching DMC appears in
+\code{src/UseCases/gfmc/reconfiguration.jl} and \code{src/UseCases/gfmc/run.jl}.
+
+First, weights are normalized into probabilities:
+
+\begin{lstlisting}[style=codeblock,caption={\code{src/UseCases/gfmc/reconfiguration.jl}}]
+function _normalized_weights(weights::AbstractVector{<:Real})
+    total = sum(weights)
+    isfinite(total) && total > 0 || error("All GFMC walker weights vanished.")
+    probs = Vector{Float64}(undef, length(weights))
+    @inbounds for i in eachindex(weights)
+        wi = Float64(weights[i])
+        wi >= 0 || throw(ArgumentError("GFMC weights must be non-negative"))
+        probs[i] = wi / total
+    end
+    return probs, total / length(weights)
+end
+\end{lstlisting}
+
+Then reconfiguration chooses indices and resets the ensemble to equal weights:
+
+\begin{lstlisting}[style=codeblock,caption={\code{src/UseCases/gfmc/run.jl}}]
+function _reconfigure!(sim::GFMCSim)
+    indices, mean_weight = resample_indices(sim.reconfiguration, sim.rng, sim.weights)
+    copy_columns!(sim.backend, sim.proposal_positions, sim.positions, indices)
+    copy_batch_data!(sim.backend, sim.proposal_data, sim.state_data, indices)
+
+    tmp_positions = sim.positions
+    sim.positions = sim.proposal_positions
+    sim.proposal_positions = tmp_positions
+
+    tmp_data = sim.state_data
+    sim.state_data = sim.proposal_data
+    sim.proposal_data = tmp_data
+
+    fill_ones!(sim.backend, sim.weights)
+    return mean_weight
+end
+\end{lstlisting}
+
+So instead of explicit birth/death at every step, this code accumulates weights
+for several steps and only then converts weight imbalance into ancestry counts.
+That is why this implementation is best described as a weighted fixed-population
+GFMC projector.
+
+\section{Reference-Energy Control}
+
+The reference energy update is also fixed-population in spirit:
+
+\begin{lstlisting}[style=codeblock,caption={\code{src/UseCases/gfmc/run.jl}}]
+function _update_reference_energy!(sim::GFMCSim, mean_weight::Real)
+    window = sim.params.energy_window
+    if isempty(sim.energy_mean_history)
+        Eblock = estimate_energy(sim)
+    else
+        hi = lastindex(sim.energy_mean_history)
+        lo = max(1, hi - window + 1)
+        block = @view sim.energy_mean_history[lo:hi]
+        Eblock = sum(block) / length(block)
+    end
+
+    dt_block = sim.params.dt * sim.params.reconfiguration_interval
+    correction = sim.params.feedback == 0 ? 0.0 :
+        (sim.params.feedback / dt_block) * log(max(Float64(mean_weight), eps(Float64)))
+    sim.ET = Eblock - correction
+    return sim
+end
+\end{lstlisting}
+
+In equations, the update is
+\begin{equation}
+\ET \leftarrow E_{\rm block} -
+\frac{\texttt{feedback}}{\dtau \cdot \texttt{reconfiguration\_interval}}
+\log(\overline w),
+\end{equation}
+where $\overline w$ is the mean weight returned by the reconfiguration stage.
+
+Interpretation:
+\begin{itemize}
+    \item if the ensemble weights are trending upward, the correction lowers
+    future growth,
+    \item if the ensemble weights are trending downward, the correction raises
+    future growth.
+\end{itemize}
+
+This plays the role that population control plays in ordinary DMC, but it is
+adapted to a constant-walker ensemble.
+
+\section{Energy Estimation}
+
+The measured energy is the weighted mean of the current branch-energy field:
+
+\begin{lstlisting}[style=codeblock,caption={\code{src/UseCases/gfmc/sim.jl}}]
+function estimate_energy(sim::GFMCSim)::Float64
+    numerator = 0.0
+    denom = 0.0
+    @inbounds for j in eachindex(sim.weights)
+        w = sim.weights[j]
+        numerator += w * sim.state_data.branch_energy[j]
+        denom += w
+    end
+    return denom > 0 ? numerator / denom : 0.0
+end
+\end{lstlisting}
+
+So the estimator is
+\begin{equation}
+E \approx \frac{\sum_j w_j \EL(R_j)}{\sum_j w_j},
+\end{equation}
+which is exactly the mixed-estimator logic you expect from importance-sampled
+projector Monte Carlo.
+
+\section{How You Use the Engine}
+
+\subsection{Generic Hamiltonian path}
+
+The generic path is:
+\begin{enumerate}
+    \item define a \code{Hamiltonian},
+    \item define a \code{TrialWF} if you want importance sampling,
+    \item wrap it as \code{ImportanceGuiding(trial, H)},
+    \item create \code{GFMCParams},
+    \item create \code{GFMCSim},
+    \item call \code{run\_gfmc!}.
+\end{enumerate}
+
+\begin{lstlisting}[style=codeblock,caption={Minimal generic usage from \code{docs/GFMC_USER_GUIDE.md}}]
+using Random
+using System1D
+
+bc = PeriodicBoundary1D(0.0, 1.0)
+H = Hamiltonian(1, 0.5, R -> 0.5 * sum(abs2, R), bc)
+trial = TrialWF(
+    R -> -0.5 * sum(abs2, R),
+    R -> -R,
+    R -> -length(R),
+)
+guiding = ImportanceGuiding(trial, H)
+
+params = GFMCParams(0.02, 100, 20, 256, 0.5, 0.2, 5, 5.0, 20)
+walkers = [Walker([rand()]) for _ in 1:params.targetN]
+
+sim = GFMCSim(H, params, walkers, MersenneTwister(7);
+    guiding=guiding,
+    nodepolicy=NoNode(),
+    reconfiguration=SystematicReconfiguration(),
+)
+
+run_gfmc!(sim; snapshot_steps=[0, params.nsteps], debug=true)
+\end{lstlisting}
+
+\subsection{VMC warm start}
+
+The repository also includes a one-call helper that first samples
+$|\Psi_T|^2$ with VMC and then launches GFMC:
+
+\begin{lstlisting}[style=codeblock,caption={Excerpt from \code{src/UseCases/common/warm_start.jl}}]
+function run_gfmc_with_vmc_init(
+    h,
+    gfmc_params::GFMCParams,
+    init_configs,
+    trial_wf,
+    vmc_params::VMCParams;
+    vmc_rng::AbstractRNG=Random.default_rng(),
+    gfmc_rng::AbstractRNG=Random.default_rng(),
+    proposal::Union{AbstractVMCProposal,Symbol}=DriftGaussianProposal(),
+    guiding::AbstractGuiding=ImportanceGuiding(trial_wf, h),
+    nodepolicy::AbstractNodePolicy=NoNode(),
+    backend::AbstractGFMCBackend=CPUBackend(),
+    reconfiguration::AbstractGFMCReconfiguration=SystematicReconfiguration(),
+    ...
+)
+    positions = sample_vmc_positions(...)
+    sim = GFMCSim(h, gfmc_params, positions, gfmc_rng; ...)
+    return run_gfmc!(sim; ...)
+end
+\end{lstlisting}
+
+This helper is conceptually clean:
+\begin{itemize}
+    \item VMC provides an initial ensemble closer to $|\Psi_T|^2$,
+    \item GFMC then projects that ensemble in imaginary time.
+\end{itemize}
+
+\subsection{Specialized fermion-ring path}
+
+For the ring model, you can bypass the generic trial/guiding setup because the
+kernel knows the model's built-in trial structure:
+
+\begin{lstlisting}[style=codeblock,caption={Minimal ring-model usage from \code{docs/GFMC_USER_GUIDE.md}}]
+using Random
+using System1D
+
+model = SpinlessFermionRing1D(3, 1.0, 3.0, 1.0;
+    lambda=-0.5,
+    node_tol=1e-8,
+    trig_eps=1e-10,
+)
+params = GFMCParams(0.003, 50, 10, 128, -0.2, 0.1, 2, 5.0, 10)
+positions = sample_uniform_configurations(model, params.targetN, MersenneTwister(101))
+
+sim = GFMCSim(model, params, positions, MersenneTwister(202);
+    use_guiding=true,
+    nodepolicy=FixedNode(),
+)
+
+run_gfmc!(sim; snapshot_steps=[0, params.nsteps])
+\end{lstlisting}
+
+\section{What Is Most Important to Remember}
+
+If you want one precise sentence that matches the code, it is this:
+
+\begin{quote}
+This GFMC implementation approximates the repeated action of the
+imaginary-time propagator by alternating importance-sampled drift-diffusion
+proposals, Metropolis correction, multiplicative short-time weights, and
+periodic fixed-population reconfiguration.
+\end{quote}
+
+The most important caveats are:
+\begin{itemize}
+    \item it is a fixed-population weighted projector, not explicit branching
+    DMC,
+    \item unguided paths set \code{sign = 1.0}, so fixed-node logic only has
+    real effect when the active kernel supplies sign information,
+    \item the recorded energy is the weighted branch-energy estimator, not a
+    descendant-weight or forward-walking estimator,
+    \item the GFMC path stores real coordinates only and does not propagate the
+    phase factors associated with twisted-boundary wrapping.
+\end{itemize}
+
+\section{How to Compile This File}
+
+From the repository root, run:
+
+\begin{lstlisting}[style=codeblock]
+mkdir -p docs/build
+latexmk -pdf -output-directory=docs/build docs/GFMC_CODE_WALKTHROUGH.tex
+\end{lstlisting}
+
+The expected PDF output path is:
+
+\begin{lstlisting}[style=codeblock]
+docs/build/GFMC_CODE_WALKTHROUGH.pdf
+\end{lstlisting}
+
+If you prefer plain \code{pdflatex}, this also works:
+
+\begin{lstlisting}[style=codeblock]
+mkdir -p docs/build
+pdflatex -interaction=nonstopmode -halt-on-error \
+  -output-directory=docs/build docs/GFMC_CODE_WALKTHROUGH.tex
+\end{lstlisting}
+
+\end{document}

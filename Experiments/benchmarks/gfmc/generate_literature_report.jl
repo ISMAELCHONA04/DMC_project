@@ -1,0 +1,20 @@
+include(joinpath(@__DIR__, "gfmc_literature_report_helpers.jl"))
+
+summary_rows = output_summary_rows()
+final_rows = build_final_comparison_rows(summary_rows)
+series_rows = build_series_rows(summary_rows)
+
+final_csv = write_rows_csv(joinpath(LITERATURE_TABLES_DIR, "final_comparison.csv"), final_rows)
+series_csv = write_rows_csv(joinpath(LITERATURE_TABLES_DIR, "series_comparison.csv"), series_rows)
+final_plot = save_final_dumbbell_plot(final_rows)
+error_plot = save_final_error_plot(final_rows)
+stress_plot = save_stress_series_plot(series_rows)
+report_path = write_literature_markdown(final_rows, final_csv)
+
+println("Literature report written.")
+println("Final comparison CSV: ", abspath(final_csv))
+println("Series comparison CSV: ", abspath(series_csv))
+println("Final comparison plot: ", abspath(final_plot))
+println("Final error plot: ", abspath(error_plot))
+println("Stress path plot: ", abspath(stress_plot))
+println("Markdown report: ", abspath(report_path))
